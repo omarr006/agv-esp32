@@ -77,7 +77,16 @@ const int JOYSTICK_TURN_DEADZONE = 3;
 const int CMD_RAMP_STEP = 3;
 const int REVERSE_GUARD = 18;
 const float INPUT_ALPHA = 0.22f;
+const float MOVE_MODE_THRESHOLD = 0.16f;
+const float CURVE_TURN_GAIN = 0.95f;
+const int MIN_WHEEL_WHILE_TURNING = 18;
 const unsigned long HUPE_INTERVAL_MS = 250;
+
+float clampf(float value, float minValue, float maxValue) {
+  if (value < minValue) return minValue;
+  if (value > maxValue) return maxValue;
+  return value;
+}
 
 int rampTo(int current, int target, int step) {
   if (current < target) {
@@ -546,10 +555,40 @@ void loop() { //Endlosschleife
     if (abs(filteredX) < JOYSTICK_TURN_DEADZONE) filteredX = 0;
     if (abs(filteredY) < JOYSTICK_DRIVE_DEADZONE) filteredY = 0;
 
-    //Car-ähnliches Lenkverhalten: bei wenig Gas weniger harte Lenkung
-    int steer = (filteredX * (50 + abs(filteredY))) / 150;
-    int cmdLTarget = constrain(filteredY + steer, -100, 100);
-    int cmdRTarget = constrain(filteredY - steer, -100, 100);
+    float throttle = (float)filteredY / 100.0f;
+    float turn = (float)filteredX / 100.0f;
+
+    int cmdLTarget = 0;
+    int cmdRTarget = 0;
+
+    //Beim Fahren: beide Räder gleiches Vorzeichen -> saubere Bögen statt Ruckeln
+    if (fabsf(throttle) > MOVE_MODE_THRESHOLD) {
+      float left = throttle * (1.0f + turn * CURVE_TURN_GAIN);
+      float right = throttle * (1.0f - turn * CURVE_TURN_GAIN);
+
+      float maxMag = max(fabsf(left), fabsf(right));
+      if (maxMag > 1.0f) {
+        left /= maxMag;
+        right /= maxMag;
+      }
+
+      if (fabsf(turn) > 0.25f) {
+        float minWheel = (float)MIN_WHEEL_WHILE_TURNING / 100.0f;
+        if (fabsf(left) < minWheel) {
+          left = (throttle >= 0.0f) ? minWheel : -minWheel;
+        }
+        if (fabsf(right) < minWheel) {
+          right = (throttle >= 0.0f) ? minWheel : -minWheel;
+        }
+      }
+
+      cmdLTarget = (int)roundf(clampf(left, -1.0f, 1.0f) * 100.0f);
+      cmdRTarget = (int)roundf(clampf(right, -1.0f, 1.0f) * 100.0f);
+    } else {
+      //Bei fast null Gas: Drehen auf Stelle
+      cmdLTarget = (int)roundf(turn * 100.0f);
+      cmdRTarget = (int)roundf(-turn * 100.0f);
+    }
 
     //Befehle weich rampen statt springen
     cmdLCurrent = rampTo(cmdLCurrent, cmdLTarget, CMD_RAMP_STEP);
