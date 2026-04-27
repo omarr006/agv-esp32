@@ -72,7 +72,8 @@ unsigned long lastStepMicrosL=0;
 unsigned long lastStepMicrosR=0;
 unsigned long lastHupeMillis=0;
 
-const int JOYSTICK_DEADZONE = 8;
+const int JOYSTICK_DRIVE_DEADZONE = 8;
+const int JOYSTICK_TURN_DEADZONE = 3;
 const int CMD_RAMP_STEP = 3;
 const int REVERSE_GUARD = 18;
 const float INPUT_ALPHA = 0.22f;
@@ -258,6 +259,7 @@ const char index_html[] PROGMEM = R"rawliteral(
    var joyRadius = 73;
    var joyCenter = 110;
   var lastSend = 0;
+  var joyActive = false;
 
    function sendDrive(x, y) {
      var now = Date.now();
@@ -296,20 +298,29 @@ const char index_html[] PROGMEM = R"rawliteral(
    }
 
    joyPad.addEventListener('pointerdown', function(e) {
+     joyActive = true;
      joyPad.setPointerCapture(e.pointerId);
      updateStick(e.clientX, e.clientY);
    });
 
    joyPad.addEventListener('pointermove', function(e) {
-     if ((e.buttons & 1) !== 1) return;
+     if (!joyActive) return;
      updateStick(e.clientX, e.clientY);
    });
 
    joyPad.addEventListener('pointerup', function() {
+     joyActive = false;
      resetStick();
    });
 
    joyPad.addEventListener('pointercancel', function() {
+     joyActive = false;
+     resetStick();
+   });
+
+   joyPad.addEventListener('pointerleave', function() {
+     if (!joyActive) return;
+     joyActive = false;
      resetStick();
    });
   </script>
@@ -532,8 +543,8 @@ void loop() { //Endlosschleife
     int filteredX = (int)roundf(smoothX);
     int filteredY = (int)roundf(smoothY);
 
-    if (abs(filteredX) < JOYSTICK_DEADZONE) filteredX = 0;
-    if (abs(filteredY) < JOYSTICK_DEADZONE) filteredY = 0;
+    if (abs(filteredX) < JOYSTICK_TURN_DEADZONE) filteredX = 0;
+    if (abs(filteredY) < JOYSTICK_DRIVE_DEADZONE) filteredY = 0;
 
     //Car-ähnliches Lenkverhalten: bei wenig Gas weniger harte Lenkung
     int steer = (filteredX * (50 + abs(filteredY))) / 150;
@@ -553,8 +564,8 @@ void loop() { //Endlosschleife
       cmdRCurrent = 0;
     }
 
-    bool enableL = abs(cmdLCurrent) > JOYSTICK_DEADZONE;
-    bool enableR = abs(cmdRCurrent) > JOYSTICK_DEADZONE;
+    bool enableL = abs(cmdLCurrent) > JOYSTICK_DRIVE_DEADZONE;
+    bool enableR = abs(cmdRCurrent) > JOYSTICK_DRIVE_DEADZONE;
     bool driveActive = enableL || enableR;
 
     //Motoren nur aktivieren wenn wirklich Fahrbefehl anliegt
@@ -573,7 +584,7 @@ void loop() { //Endlosschleife
 
     if (enableL) {
       int absL = abs(cmdLCurrent);
-      unsigned long intervalL = map(absL, JOYSTICK_DEADZONE, 100, 5200, 1000);
+      unsigned long intervalL = map(absL, JOYSTICK_DRIVE_DEADZONE, 100, 5200, 1000);
       if (nowMicros - lastStepMicrosL >= intervalL) {
         STEP_L = !STEP_L;
         digitalWrite(STP_L, STEP_L);
@@ -587,7 +598,7 @@ void loop() { //Endlosschleife
 
     if (enableR) {
       int absR = abs(cmdRCurrent);
-      unsigned long intervalR = map(absR, JOYSTICK_DEADZONE, 100, 5200, 1000);
+      unsigned long intervalR = map(absR, JOYSTICK_DRIVE_DEADZONE, 100, 5200, 1000);
       if (nowMicros - lastStepMicrosR >= intervalR) {
         STEP_R = !STEP_R;
         digitalWrite(STP_R, STEP_R);
