@@ -58,6 +58,24 @@ int zeit=0;
 //varible zum langsam fahren
 int i=0;    //variable für beschleunigung
 
+//Joystick Fahrdaten (-100 bis 100)
+volatile int driveX=0;
+volatile int driveY=0;
+bool hupeAktiv=false;
+
+//Timing für nicht blockierende Ansteuerung
+unsigned long lastStepMicrosL=0;
+unsigned long lastStepMicrosR=0;
+unsigned long lastHupeMillis=0;
+
+const int JOYSTICK_DEADZONE = 8;
+const unsigned long HUPE_INTERVAL_MS = 250;
+
+void setDrive(int x, int y) {
+  driveX = constrain(x, -100, 100);
+  driveY = constrain(y, -100, 100);
+}
+
 
 //Website
 //keine Kommentare möglich
@@ -102,6 +120,39 @@ const char index_html[] PROGMEM = R"rawliteral(
         background-color: #091b44;
         box-shadow: 0 4px #666;
         transform: translateY(2px);
+      }
+
+      .joystick-wrap {
+        display: inline-block;
+        margin-top: 16px;
+      }
+
+      .joystick-pad {
+        width: 220px;
+        height: 220px;
+        border-radius: 50%;
+        border: 3px solid #003265;
+        background: radial-gradient(circle at 30% 30%, #f7fbff, #d4e3f6);
+        position: relative;
+        touch-action: none;
+        user-select: none;
+      }
+
+      .joystick-stick {
+        width: 74px;
+        height: 74px;
+        border-radius: 50%;
+        background: #003265;
+        position: absolute;
+        left: 73px;
+        top: 73px;
+        box-shadow: 0 8px 16px rgba(0,0,0,0.25);
+      }
+
+      .drive-text {
+        margin-top: 8px;
+        color: #003265;
+        font-weight: bold;
       }
     </style>
   </head>
@@ -161,6 +212,17 @@ const char index_html[] PROGMEM = R"rawliteral(
     <button class="button" onmousedown="toggleCheckbox('aus');" ontouchstart="toggleCheckbox('aus');" onmouseup="toggleCheckbox('off');" ontouchend="toggleCheckbox('off');"> AUS</button>
      </p>
 
+    <p align=middle>
+    __________________________
+    </p>
+
+    <div class="joystick-wrap">
+      <div class="joystick-pad" id="joyPad">
+        <div class="joystick-stick" id="joyStick"></div>
+      </div>
+      <div class="drive-text" id="driveText">X: 0 | Y: 0</div>
+    </div>
+
     <h1>Viel Spass mit deinem Auto :)
 
 
@@ -172,6 +234,67 @@ const char index_html[] PROGMEM = R"rawliteral(
      xhr.open("GET", "/" + x, true);
      xhr.send();
    }
+
+   var joyPad = document.getElementById('joyPad');
+   var joyStick = document.getElementById('joyStick');
+   var driveText = document.getElementById('driveText');
+   var joyRadius = 73;
+   var joyCenter = 110;
+   var lastSend = 0;
+
+   function sendDrive(x, y) {
+     var now = Date.now();
+     if (now - lastSend < 50) return;
+     lastSend = now;
+
+     var xhr = new XMLHttpRequest();
+     xhr.open("GET", "/drive?x=" + x + "&y=" + y, true);
+     xhr.send();
+     driveText.textContent = "X: " + x + " | Y: " + y;
+   }
+
+   function updateStick(clientX, clientY) {
+     var rect = joyPad.getBoundingClientRect();
+     var x = clientX - rect.left - joyCenter;
+     var y = clientY - rect.top - joyCenter;
+     var dist = Math.sqrt(x * x + y * y);
+
+     if (dist > joyRadius) {
+       x = x * joyRadius / dist;
+       y = y * joyRadius / dist;
+     }
+
+     joyStick.style.left = (x + joyCenter - 37) + "px";
+     joyStick.style.top = (y + joyCenter - 37) + "px";
+
+     var driveX = Math.round((x / joyRadius) * 100);
+     var driveY = Math.round((-y / joyRadius) * 100);
+     sendDrive(driveX, driveY);
+   }
+
+   function resetStick() {
+     joyStick.style.left = "73px";
+     joyStick.style.top = "73px";
+     sendDrive(0, 0);
+   }
+
+   joyPad.addEventListener('pointerdown', function(e) {
+     joyPad.setPointerCapture(e.pointerId);
+     updateStick(e.clientX, e.clientY);
+   });
+
+   joyPad.addEventListener('pointermove', function(e) {
+     if ((e.buttons & 1) !== 1) return;
+     updateStick(e.clientX, e.clientY);
+   });
+
+   joyPad.addEventListener('pointerup', function() {
+     resetStick();
+   });
+
+   joyPad.addEventListener('pointercancel', function() {
+     resetStick();
+   });
   </script>
   </body>
 </html>)rawliteral";
@@ -273,6 +396,8 @@ void setup() {
   //Befehl vom Webserver, Schalter für vor gedrückt
   server.on("/vor", HTTP_GET, [] (AsyncWebServerRequest *request) {
     schalter=1;
+    hupeAktiv=false;
+    setDrive(0, 100);
     request->send(200, "text/plain", "ok");
   });
 
@@ -280,26 +405,52 @@ void setup() {
   //Befehl vom Webserver, Schalter für links gedrückt
   server.on("/links", HTTP_GET, [] (AsyncWebServerRequest *request) {
     schalter=2;
+    hupeAktiv=false;
+    setDrive(-100, 0);
     request->send(200, "text/plain", "ok");
   });
 
   server.on("/rechts", HTTP_GET, [] (AsyncWebServerRequest *request) {
     schalter=3;
+    hupeAktiv=false;
+    setDrive(100, 0);
     request->send(200, "text/plain", "ok");
   });
  
   server.on("/back", HTTP_GET, [] (AsyncWebServerRequest *request) {
     schalter=4;
+    hupeAktiv=false;
+    setDrive(0, -100);
     request->send(200, "text/plain", "ok");
   });
 
   server.on("/HUPE", HTTP_GET, [] (AsyncWebServerRequest *request) {
     schalter=5;
+    hupeAktiv=true;
+    request->send(200, "text/plain", "ok");
+  });
+
+  server.on("/drive", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    int x = 0;
+    int y = 0;
+
+    if (request->hasParam("x")) {
+      x = request->getParam("x")->value().toInt();
+    }
+
+    if (request->hasParam("y")) {
+      y = request->getParam("y")->value().toInt();
+    }
+
+    hupeAktiv=false;
+    setDrive(x, y);
     request->send(200, "text/plain", "ok");
   });
 
   server.on("/off", HTTP_GET, [] (AsyncWebServerRequest *request) {
     schalter=0;
+    hupeAktiv=false;
+    setDrive(0, 0);
     request->send(200, "text/plain", "ok");
   });
 
@@ -310,22 +461,8 @@ void setup() {
 
 void loop() { //Endlosschleife
 
-    digitalWrite(rotLED,HIGH);
-
     altschalter=schalter;
     altLED=LED;
-
-    //Zustand vom Schalter abfragen
-    if(schalter!=0) //bei nicht STOP, Motoren enabeln
-    {
-      digitalWrite(EN_L,LOW);
-      digitalWrite(EN_R,LOW);
-    }
-    else  //bei STOP Motoren nicht enabeln
-    {
-      digitalWrite(EN_L,HIGH);
-      digitalWrite(EN_R,HIGH);
-    }
 
     switch(LED){ //Je nach Zustand wird RGB-LED verstellt
       case 1: //LED rot
@@ -369,57 +506,57 @@ void loop() { //Endlosschleife
     digitalWrite(gruenLED, gruen);
     digitalWrite(blauLED, blau);
 
+    int x = driveX;
+    int y = driveY;
 
-    switch(schalter){  //je nach Zustand wird die Richtung von Motoren verändert
-      case 1:   //vor
-          digitalWrite(DIR_R, LOW);      // Motor rechts vor
-          digitalWrite (DIR_L,HIGH);     // Motor links vor ( andere Drehrechtung wegen gespiegelter Montage
-          i = 3500;
-        break;
-      case 2: //links Eck 
-          digitalWrite(DIR_R, LOW);
-          digitalWrite (DIR_L,LOW);
-          i = 4500;
-          break;
-      case 3:  //rechts Eck
-          digitalWrite(DIR_R, HIGH);
-          digitalWrite (DIR_L,HIGH);
-          i = 4500;
-          break;
-      case 4:  //zurück
-          digitalWrite(DIR_R, HIGH);
-          digitalWrite (DIR_L,LOW);
-          i = 3500;
-          break;
-      case 5:  //Hupe
-          while(schalter==altschalter&&LED==altLED)
-          {
-            digitalWrite (17,HIGH);
-            delay(500); 
-            digitalWrite(17,LOW);
-            delay(500);
-          }
-          break;
+    int cmdL = constrain(y + x, -100, 100);
+    int cmdR = constrain(y - x, -100, 100);
+
+    bool enableL = abs(cmdL) > JOYSTICK_DEADZONE;
+    bool enableR = abs(cmdR) > JOYSTICK_DEADZONE;
+    bool driveActive = enableL || enableR;
+
+    //Motoren nur aktivieren wenn wirklich Fahrbefehl anliegt
+    digitalWrite(EN_L, driveActive ? LOW : HIGH);
+    digitalWrite(EN_R, driveActive ? LOW : HIGH);
+
+    if (enableL) {
+      digitalWrite(DIR_L, (cmdL > 0) ? HIGH : LOW);
     }
 
-      
-      //Fahren
+    if (enableR) {
+      digitalWrite(DIR_R, (cmdR > 0) ? LOW : HIGH);
+    }
 
-      zeit=20;
-        
-        while(schalter==altschalter&&LED==altLED)   //langsames Anfahren
-        {
-          if (i >= 1000){
-          digitalWrite(STP_L,!digitalRead(STP_L));    
-          digitalWrite(STP_R,!digitalRead(STP_R));
-          delayMicroseconds(i);  //Zeit zwischen den Schritten
-          i = i-2;
-          }
-          else
-          {
-            digitalWrite(STP_L,!digitalRead(STP_L));    
-            digitalWrite(STP_R,!digitalRead(STP_R));
-            delayMicroseconds(1000);  //Zeit zwischen den Schritten
-          }
-        }   
+    unsigned long nowMicros = micros();
+
+    if (enableL) {
+      int absL = abs(cmdL);
+      unsigned long intervalL = map(absL, JOYSTICK_DEADZONE, 100, 3500, 1000);
+      if (nowMicros - lastStepMicrosL >= intervalL) {
+        STEP_L = !STEP_L;
+        digitalWrite(STP_L, STEP_L);
+        lastStepMicrosL = nowMicros;
+      }
+    }
+
+    if (enableR) {
+      int absR = abs(cmdR);
+      unsigned long intervalR = map(absR, JOYSTICK_DEADZONE, 100, 3500, 1000);
+      if (nowMicros - lastStepMicrosR >= intervalR) {
+        STEP_R = !STEP_R;
+        digitalWrite(STP_R, STEP_R);
+        lastStepMicrosR = nowMicros;
+      }
+    }
+
+    //Nicht blockierende Hupe, damit Fahren gleichzeitig möglich bleibt
+    if (hupeAktiv) {
+      if (millis() - lastHupeMillis >= HUPE_INTERVAL_MS) {
+        lastHupeMillis = millis();
+        digitalWrite(hupePIN, !digitalRead(hupePIN));
+      }
+    } else {
+      digitalWrite(hupePIN, LOW);
+    }
 }
