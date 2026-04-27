@@ -59,8 +59,12 @@ int zeit=0;
 int i=0;    //variable für beschleunigung
 
 //Joystick Fahrdaten (-100 bis 100)
-volatile int driveX=0;
-volatile int driveY=0;
+volatile int targetX=0;
+volatile int targetY=0;
+float smoothX=0;
+float smoothY=0;
+int cmdLCurrent=0;
+int cmdRCurrent=0;
 bool hupeAktiv=false;
 
 //Timing für nicht blockierende Ansteuerung
@@ -69,11 +73,24 @@ unsigned long lastStepMicrosR=0;
 unsigned long lastHupeMillis=0;
 
 const int JOYSTICK_DEADZONE = 8;
+const int CMD_RAMP_STEP = 3;
+const int REVERSE_GUARD = 18;
+const float INPUT_ALPHA = 0.22f;
 const unsigned long HUPE_INTERVAL_MS = 250;
 
+int rampTo(int current, int target, int step) {
+  if (current < target) {
+    return min(current + step, target);
+  }
+  if (current > target) {
+    return max(current - step, target);
+  }
+  return current;
+}
+
 void setDrive(int x, int y) {
-  driveX = constrain(x, -100, 100);
-  driveY = constrain(y, -100, 100);
+  targetX = constrain(x, -100, 100);
+  targetY = constrain(y, -100, 100);
 }
 
 
@@ -240,11 +257,11 @@ const char index_html[] PROGMEM = R"rawliteral(
    var driveText = document.getElementById('driveText');
    var joyRadius = 73;
    var joyCenter = 110;
-   var lastSend = 0;
+  var lastSend = 0;
 
    function sendDrive(x, y) {
      var now = Date.now();
-     if (now - lastSend < 50) return;
+    if (now - lastSend < 25) return;
      lastSend = now;
 
      var xhr = new XMLHttpRequest();
@@ -352,7 +369,6 @@ void setup() {
 
   
  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-  request->send_P(200, "text/html", index_html);
    request->send(200, "text/html", index_html);
   });
 
@@ -506,14 +522,39 @@ void loop() { //Endlosschleife
     digitalWrite(gruenLED, gruen);
     digitalWrite(blauLED, blau);
 
-    int x = driveX;
-    int y = driveY;
+    int x = targetX;
+    int y = targetY;
 
-    int cmdL = constrain(y + x, -100, 100);
-    int cmdR = constrain(y - x, -100, 100);
+    //Joystick Eingaben glätten
+    smoothX += INPUT_ALPHA * ((float)x - smoothX);
+    smoothY += INPUT_ALPHA * ((float)y - smoothY);
 
-    bool enableL = abs(cmdL) > JOYSTICK_DEADZONE;
-    bool enableR = abs(cmdR) > JOYSTICK_DEADZONE;
+    int filteredX = (int)roundf(smoothX);
+    int filteredY = (int)roundf(smoothY);
+
+    if (abs(filteredX) < JOYSTICK_DEADZONE) filteredX = 0;
+    if (abs(filteredY) < JOYSTICK_DEADZONE) filteredY = 0;
+
+    //Car-ähnliches Lenkverhalten: bei wenig Gas weniger harte Lenkung
+    int steer = (filteredX * (50 + abs(filteredY))) / 150;
+    int cmdLTarget = constrain(filteredY + steer, -100, 100);
+    int cmdRTarget = constrain(filteredY - steer, -100, 100);
+
+    //Befehle weich rampen statt springen
+    cmdLCurrent = rampTo(cmdLCurrent, cmdLTarget, CMD_RAMP_STEP);
+    cmdRCurrent = rampTo(cmdRCurrent, cmdRTarget, CMD_RAMP_STEP);
+
+    //Kurz um Null halten, damit Richtung nicht flattert
+    if (abs(cmdLCurrent) < REVERSE_GUARD && ((cmdLCurrent > 0 && cmdLTarget < 0) || (cmdLCurrent < 0 && cmdLTarget > 0))) {
+      cmdLCurrent = 0;
+    }
+
+    if (abs(cmdRCurrent) < REVERSE_GUARD && ((cmdRCurrent > 0 && cmdRTarget < 0) || (cmdRCurrent < 0 && cmdRTarget > 0))) {
+      cmdRCurrent = 0;
+    }
+
+    bool enableL = abs(cmdLCurrent) > JOYSTICK_DEADZONE;
+    bool enableR = abs(cmdRCurrent) > JOYSTICK_DEADZONE;
     bool driveActive = enableL || enableR;
 
     //Motoren nur aktivieren wenn wirklich Fahrbefehl anliegt
@@ -521,33 +562,41 @@ void loop() { //Endlosschleife
     digitalWrite(EN_R, driveActive ? LOW : HIGH);
 
     if (enableL) {
-      digitalWrite(DIR_L, (cmdL > 0) ? HIGH : LOW);
+      digitalWrite(DIR_L, (cmdLCurrent > 0) ? HIGH : LOW);
     }
 
     if (enableR) {
-      digitalWrite(DIR_R, (cmdR > 0) ? LOW : HIGH);
+      digitalWrite(DIR_R, (cmdRCurrent > 0) ? LOW : HIGH);
     }
 
     unsigned long nowMicros = micros();
 
     if (enableL) {
-      int absL = abs(cmdL);
-      unsigned long intervalL = map(absL, JOYSTICK_DEADZONE, 100, 3500, 1000);
+      int absL = abs(cmdLCurrent);
+      unsigned long intervalL = map(absL, JOYSTICK_DEADZONE, 100, 5200, 1000);
       if (nowMicros - lastStepMicrosL >= intervalL) {
         STEP_L = !STEP_L;
         digitalWrite(STP_L, STEP_L);
         lastStepMicrosL = nowMicros;
       }
+    } else {
+      STEP_L = LOW;
+      digitalWrite(STP_L, STEP_L);
+      lastStepMicrosL = nowMicros;
     }
 
     if (enableR) {
-      int absR = abs(cmdR);
-      unsigned long intervalR = map(absR, JOYSTICK_DEADZONE, 100, 3500, 1000);
+      int absR = abs(cmdRCurrent);
+      unsigned long intervalR = map(absR, JOYSTICK_DEADZONE, 100, 5200, 1000);
       if (nowMicros - lastStepMicrosR >= intervalR) {
         STEP_R = !STEP_R;
         digitalWrite(STP_R, STEP_R);
         lastStepMicrosR = nowMicros;
       }
+    } else {
+      STEP_R = LOW;
+      digitalWrite(STP_R, STEP_R);
+      lastStepMicrosR = nowMicros;
     }
 
     //Nicht blockierende Hupe, damit Fahren gleichzeitig möglich bleibt
